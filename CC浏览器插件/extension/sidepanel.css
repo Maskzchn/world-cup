@@ -1,26 +1,28 @@
-body.panel { width: auto; min-height: 100vh; display: flex; flex-direction: column; }
-.section-title {
-  font-size: 12px;
-  color: #bbb;
-  margin-bottom: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+  font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #1e1e1e; color: #e8e8e8; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #333; }
+.brand { font-weight: 600; color: #2563eb; }
+.status.on { color: #4caf50; }
+.status.off { color: #e05a5a; }
+.card { padding: 12px 14px; border-bottom: 1px solid #2a2a2a; }
 .card.grow { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.row { display: flex; align-items: center; gap: 6px; }
+.row label { color: #aaa; }
+input[type=number] { flex: 1; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 6px; padding: 6px 8px; }
+.check { display: flex; align-items: center; gap: 6px; margin-top: 10px; color: #aaa; }
+button { border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; background: #2563eb; color: #fff; }
+button.ghost { background: #333; color: #ddd; }
+button.on { background: #2e7d4f; }
 button.mini { padding: 3px 8px; font-size: 11px; }
-
+button.wide { width: 100%; margin-top: 8px; }
+.section-title { font-size: 12px; color: #bbb; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
 .tab-list { display: flex; flex-direction: column; gap: 6px; }
-.tab-item {
-  display: flex; align-items: center; gap: 8px;
-  background: #262626; border: 1px solid #383838; border-radius: 6px; padding: 7px 9px;
-}
+.tab-item { display: flex; align-items: center; gap: 8px; background: #262626; border: 1px solid #383838; border-radius: 6px; padding: 7px 9px; }
 .tab-item .meta { flex: 1; min-width: 0; }
 .tab-item .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .tab-item .u { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; color: #777; }
-.tab-item button { white-space: nowrap; }
 .empty { color: #666; font-size: 12px; padding: 6px 0; }
-
 .log { flex: 1; overflow-y: auto; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.6; }
 .log-line { display: flex; gap: 6px; padding: 2px 0; border-bottom: 1px solid #242424; }
 .log-line .ts { color: #666; }

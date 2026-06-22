@@ -1,9 +1,14 @@
 {
   "manifest_version": 3,
   "name": "CC Browser Bridge",
-  "version": "0.1.0",
-  "description": "让本地 Claude Code 通过 CDP+DOM 控制你已登录的浏览器，读取/新建/编辑内部文档（含钉钉文档）。",
+  "version": "2.0.0",
+  "description": "Let your local Claude Code read and edit pages in your real, logged-in browser (CDP + DOM, with DingTalk doc support).",
   "minimum_chrome_version": "116",
+  "permissions": ["tabs", "scripting", "activeTab", "storage", "alarms", "debugger", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "CC Browser Bridge",
@@ -14,38 +19,13 @@
       "128": "icons/icon128.png"
     }
   },
-  "side_panel": {
-    "default_path": "sidepanel.html"
-  },
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "css": ["content.css"],
-      "run_at": "document_idle",
-      "all_frames": false
-    }
-  ],
-  "permissions": [
-    "tabs",
-    "activeTab",
-    "scripting",
-    "debugger",
-    "storage",
-    "sidePanel"
-  ],
-  "host_permissions": ["<all_urls>"],
-  "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*;"
+  "side_panel": {
+    "default_path": "sidepanel.html"
   }
 }

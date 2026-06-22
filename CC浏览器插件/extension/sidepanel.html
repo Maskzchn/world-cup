@@ -1,36 +1,35 @@
-<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="stylesheet" href="popup.css" />
-    <link rel="stylesheet" href="sidepanel.css" />
-  </head>
-  <body class="panel">
-    <header>
-      <div class="brand">CC Browser Bridge</div>
-      <div id="status" class="status disconnected">● 未连接</div>
-    </header>
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">CC Browser Bridge</div>
+    <div id="status" class="status off">● 未连接</div>
+  </header>
 
-    <section class="card">
-      <div class="row">
-        <label for="port">端口</label>
-        <input id="port" type="number" min="1" max="65535" />
-        <button id="savePort" class="ghost">保存</button>
-        <button id="reconnect" class="ghost">重连</button>
-      </div>
-    </section>
+  <section class="card">
+    <div class="row">
+      <label for="port">端口</label>
+      <input id="port" type="number" min="1" max="65535" />
+      <button id="connect" class="ghost">连接</button>
+    </div>
+    <label class="check"><input type="checkbox" id="allowAll" /> 允许全部标签页</label>
+  </section>
 
-    <section class="card">
-      <div class="section-title">已授权标签页 <span class="hint" id="tabsHint"></span></div>
-      <div id="tabList" class="tab-list"></div>
-    </section>
+  <section class="card">
+    <div class="section-title">已授权标签页</div>
+    <div id="tabList" class="tab-list"></div>
+  </section>
 
-    <section class="card grow">
-      <div class="section-title">实时活动 <button id="clearLog" class="ghost mini">清空</button></div>
-      <div id="log" class="log"></div>
-    </section>
+  <section class="card grow">
+    <div class="section-title">实时活动 <button id="clearLog" class="ghost mini">清空</button></div>
+    <div id="log" class="log"></div>
+  </section>
 
-    <script src="sidepanel.js"></script>
-  </body>
+  <script src="sidepanel.js"></script>
+</body>
 </html>

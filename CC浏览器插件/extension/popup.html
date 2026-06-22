@@ -1,37 +1,49 @@
-<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="stylesheet" href="popup.css" />
-  </head>
-  <body>
-    <header>
-      <div class="brand">CC Browser Bridge</div>
-      <div id="status" class="status disconnected">● 未连接</div>
-    </header>
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; width: 280px; margin: 0; padding: 14px; color: #1f2937; }
+    h1 { font-size: 14px; margin: 0 0 10px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; }
+    .dot.on { background: #16a34a; }
+    .dot.off { background: #dc2626; }
+    label { color: #6b7280; }
+    input[type=number] { width: 70px; padding: 3px 6px; border: 1px solid #d1d5db; border-radius: 6px; }
+    button { margin-top: 6px; width: 100%; padding: 7px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; font-size: 13px; }
+    button:hover { filter: brightness(.95); }
+    button.ghost { background: #eef2f7; color: #374151; }
+    button.on { background: #16a34a; }
+    .tab { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px; margin: 8px 0; }
+    .tab .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tab .u { color: #9ca3af; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hint { color: #9ca3af; font-size: 11px; margin-top: 10px; }
+    .check { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1>CC Browser Bridge</h1>
+  <div class="row">
+    <span id="dot" class="dot"></span>
+    <span id="status">检查中…</span>
+  </div>
+  <div class="row">
+    <label>端口</label>
+    <input id="port" type="number" min="1" max="65535" />
+    <button id="connect" style="width:auto;margin:0;padding:6px 10px;">保存并连接</button>
+  </div>
 
-    <section class="card">
-      <div class="row">
-        <label for="port">桥接端口</label>
-        <input id="port" type="number" min="1" max="65535" />
-        <button id="savePort" class="ghost">保存</button>
-      </div>
-      <button id="reconnect" class="ghost wide">重新连接</button>
-      <button id="openPanel" class="ghost wide">打开侧边栏 (实时活动)</button>
-    </section>
+  <div class="tab">
+    <div class="t" id="tabTitle">当前标签页</div>
+    <div class="u" id="tabUrl"></div>
+    <button id="toggleTab">在当前标签页启用</button>
+  </div>
 
-    <section class="card">
-      <div class="tab-title" id="tabTitle">当前标签页</div>
-      <div class="tab-url" id="tabUrl"></div>
-      <button id="toggleTab" class="primary wide">在当前标签页启用</button>
-      <div class="hint">只有“已启用”的标签页才允许 Claude Code 操作。</div>
-    </section>
+  <label class="check"><input type="checkbox" id="allowAll" /> 允许全部标签页（关闭安全限制）</label>
 
-    <footer>
-      <span id="enabledCount"></span>
-    </footer>
-
-    <script src="popup.js"></script>
-  </body>
+  <button id="openPanel" class="ghost">打开侧边栏（实时活动）</button>
+  <div class="hint">先在终端把 MCP 注册到 Claude Code（见 README）。绿点=已连上。只有“已启用”的标签页才允许写操作。</div>
+  <script src="popup.js"></script>
+</body>
 </html>

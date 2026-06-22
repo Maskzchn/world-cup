@@ -1,485 +1,481 @@
-// CC Browser Bridge - background service worker (MV3, module)
-//
-// 职责:
-//  1. 维护到本地桥接进程的 WebSocket 连接 (ws://127.0.0.1:<port>)
-//  2. 接收 Claude Code 经 MCP->桥 下发的命令, 用 CDP + DOM 执行, 回传结果
-//  3. 管理“受控标签页”白名单, 只在用户授权的标签页上操作 (安全开关)
+/**
+ * CC Browser Bridge — extension background service worker (merged).
+ *
+ * - 维护到本地常驻桥 (bridge.js) 的 WebSocket 连接, 代为执行浏览器命令。
+ * - 读取/探查走 DOM 注入 (chrome.scripting.executeScript)。
+ * - 点击/输入/按键/滚动走 CDP (chrome.debugger), 真实事件, 兼容钉钉/语雀 Lake 富文本。
+ * - 安全开关: 仅在“已授权”标签页执行写操作 (读操作不限制)。
+ * - 活动日志: 每条命令广播给侧边栏并落盘。
+ */
 
 const DEFAULT_PORT = 8765;
-const CDP_VERSION = "1.3";
+const CDP_VERSION = '1.3';
 
-let socket = null;
+let ws = null;
 let reconnectTimer = null;
-let reconnectDelay = 1000; // 指数退避, 上限 16s
-let pingTimer = null;
+const attached = new Set(); // 已 attach 调试器的 tabId
 
-// 当前已 attach 调试器的标签页集合
-const attached = new Set();
+/* 钉钉/语雀 Lake 编辑器选择器 (供注入函数使用) */
+const BODY_SELECTORS = [
+  '.ne-viewer-body', '.ne-engine', '.lake-engine-view', '.lakex-engine',
+  '.lake-engine', '[data-lake-id]', '[data-lake-element="root"]',
+  '.doc-content', '[data-testid="editor"]', '.ant-doc-editor', '.lake-editor',
+];
+const TITLE_SELECTORS = [
+  'textarea[placeholder*="标题"]', 'input[placeholder*="标题"]',
+  '.doc-title-input textarea', '.doc-title textarea', '.doc-title input',
+  '[data-testid="title"] textarea', 'h1.title', '.title-editor',
+];
 
-// ---------------------------------------------------------------------------
-// 配置存取
-// ---------------------------------------------------------------------------
-async function getConfig() {
-  const { bridgePort, enabledTabs } = await chrome.storage.local.get([
-    "bridgePort",
-    "enabledTabs",
-  ]);
-  return {
-    port: bridgePort || DEFAULT_PORT,
-    enabledTabs: enabledTabs || [],
-  };
+/* ------------------------------ 配置 ------------------------------ */
+async function getPort() {
+  const { port } = await chrome.storage.local.get('port');
+  return port || DEFAULT_PORT;
+}
+async function getEnabled() {
+  const { enabledTabs, allowAll } = await chrome.storage.local.get(['enabledTabs', 'allowAll']);
+  return { enabledTabs: enabledTabs || [], allowAll: !!allowAll };
+}
+async function isEnabled(tabId) {
+  const { enabledTabs, allowAll } = await getEnabled();
+  return allowAll || enabledTabs.includes(tabId);
+}
+async function requireAuth(tabId) {
+  if (!(await isEnabled(tabId))) {
+    throw new Error('标签页 ' + tabId + ' 未授权。请在扩展弹窗/侧边栏点击“启用当前页”。');
+  }
+}
+async function authorizeTab(tabId) {
+  const { enabledTabs } = await getEnabled();
+  if (!enabledTabs.includes(tabId)) {
+    enabledTabs.push(tabId);
+    await chrome.storage.local.set({ enabledTabs });
+  }
 }
 
-async function isTabEnabled(tabId) {
-  const { enabledTabs } = await getConfig();
-  // 0 表示“全部标签页”通配 (高级模式); 否则按白名单
-  return enabledTabs.includes(0) || enabledTabs.includes(tabId);
+/* ------------------------------ WS ------------------------------ */
+function setStatus(connected) {
+  chrome.storage.local.set({ connected });
+  chrome.action.setBadgeText({ text: connected ? 'ON' : '' });
+  chrome.action.setBadgeBackgroundColor({ color: connected ? '#16a34a' : '#9ca3af' });
+  chrome.runtime.sendMessage({ type: 'STATUS_UPDATE', connected }).catch(() => {});
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket 连接管理
-// ---------------------------------------------------------------------------
 async function connect() {
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-    return;
-  }
-  const { port } = await getConfig();
-  const url = `ws://127.0.0.1:${port}`;
-  try {
-    socket = new WebSocket(url);
-  } catch (e) {
-    scheduleReconnect();
-    return;
-  }
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+  const port = await getPort();
+  try { ws = new WebSocket('ws://127.0.0.1:' + port); }
+  catch (e) { scheduleReconnect(); return; }
 
-  socket.onopen = () => {
-    reconnectDelay = 1000;
-    broadcastStatus("connected");
-    send({ type: "hello", role: "extension", version: chrome.runtime.getManifest().version });
-    startPing();
+  ws.onopen = () => {
+    setStatus(true);
+    safeSend({ type: 'hello', role: 'extension', userAgent: navigator.userAgent });
   };
-
-  socket.onmessage = async (event) => {
+  ws.onmessage = (ev) => {
     let msg;
-    try {
-      msg = JSON.parse(event.data);
-    } catch {
-      return;
-    }
-    if (msg.type === "command") {
-      await handleCommand(msg);
-    }
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (msg.method) handleCommand(msg);
   };
-
-  socket.onclose = () => {
-    stopPing();
-    broadcastStatus("disconnected");
-    scheduleReconnect();
-  };
-
-  socket.onerror = () => {
-    try { socket.close(); } catch {}
-  };
+  ws.onclose = () => { setStatus(false); scheduleReconnect(); };
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
 }
+function scheduleReconnect() { clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connect, 3000); }
+function safeSend(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+function reply(id, ok, result, error) { safeSend({ id, ok, result, error }); }
 
-function scheduleReconnect() {
-  if (reconnectTimer) return;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    reconnectDelay = Math.min(reconnectDelay * 2, 16000);
-    connect();
-  }, reconnectDelay);
-}
-
-function send(obj) {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(obj));
-  }
-}
-
-function startPing() {
-  stopPing();
-  pingTimer = setInterval(() => send({ type: "ping", t: Date.now() }), 20000);
-}
-function stopPing() {
-  if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-}
-
-function broadcastStatus(status) {
-  chrome.storage.local.set({ connectionStatus: status, statusAt: Date.now() });
-  chrome.runtime.sendMessage({ type: "STATUS_UPDATE", status }).catch(() => {});
-}
-
-// ---------------------------------------------------------------------------
-// 命令分发: 收到 {type:"command", id, method, params}, 回传 {type:"result", id, ok, result|error}
-// ---------------------------------------------------------------------------
-async function handleCommand({ id, method, params }) {
-  params = params || {};
+async function handleCommand(msg) {
   const startedAt = Date.now();
   try {
-    const result = await dispatch(method, params);
-    send({ type: "result", id, ok: true, result });
-    logActivity({ method, tabId: params.tabId, ok: true, ms: Date.now() - startedAt });
-  } catch (err) {
-    const error = String(err && err.message ? err.message : err);
-    send({ type: "result", id, ok: false, error });
-    logActivity({ method, tabId: params.tabId, ok: false, error, ms: Date.now() - startedAt });
+    const result = await dispatch(msg.method, msg.params || {});
+    reply(msg.id, true, result);
+    logActivity({ method: msg.method, tabId: (msg.params || {}).tabId, ok: true, ms: Date.now() - startedAt });
+  } catch (e) {
+    const error = e && e.message ? e.message : String(e);
+    reply(msg.id, false, null, error);
+    logActivity({ method: msg.method, tabId: (msg.params || {}).tabId, ok: false, error, ms: Date.now() - startedAt });
   }
 }
 
-// 最近活动环形缓冲 (供侧边栏展示)
+/* --------------------------- 活动日志 --------------------------- */
 const ACTIVITY_MAX = 60;
 async function logActivity(entry) {
   entry.t = Date.now();
-  const { activity } = await chrome.storage.local.get("activity");
+  const { activity } = await chrome.storage.local.get('activity');
   const list = activity || [];
   list.unshift(entry);
   if (list.length > ACTIVITY_MAX) list.length = ACTIVITY_MAX;
   await chrome.storage.local.set({ activity: list });
-  chrome.runtime.sendMessage({ type: "ACTIVITY", entry }).catch(() => {});
+  chrome.runtime.sendMessage({ type: 'ACTIVITY', entry }).catch(() => {});
 }
 
-async function dispatch(method, params) {
-  switch (method) {
-    case "list_tabs":
-      return await listTabs();
-    case "get_active_tab":
-      return await getActiveControllableTab();
-    case "tab_info": {
-      const t = await chrome.tabs.get(params.tabId);
-      return { tabId: t.id, title: t.title, url: t.url, status: t.status };
-    }
-    case "navigate":
-      return await navigate(params);
-    case "get_content":
-      return await contentAction(params.tabId, { action: "readContent", format: params.format || "markdown" });
-    case "snapshot":
-      return await contentAction(params.tabId, { action: "snapshot", maxElements: params.maxElements || 200 });
-    case "screenshot":
-      return await screenshot(params);
-    case "click":
-      return await click(params);
-    case "type_text":
-      return await typeText(params);
-    case "fill":
-      return await contentAction(params.tabId, { action: "fill", selector: params.selector, ref: params.ref, text: params.text });
-    case "press_key":
-      return await pressKey(params);
-    case "focus_target":
-      return await focusTarget(params);
-    case "paste_text":
-      return await pasteText(params);
-    case "scroll":
-      return await scroll(params);
-    case "eval_js":
-      return await evalJs(params);
-    default:
-      throw new Error(`未知方法: ${method}`);
-  }
+/* ------------------------------ helpers ------------------------------ */
+async function resolveTab(params) {
+  if (params.tabId) return params.tabId;
+  let [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab) [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) throw new Error('No active tab found');
+  return tab.id;
 }
-
-// ---------------------------------------------------------------------------
-// 标签页相关
-// ---------------------------------------------------------------------------
-async function listTabs() {
-  const tabs = await chrome.tabs.query({});
-  const { enabledTabs } = await getConfig();
-  return tabs
-    .filter((t) => t.url && !t.url.startsWith("chrome://") && !t.url.startsWith("chrome-extension://"))
-    .map((t) => ({
-      tabId: t.id,
-      title: t.title,
-      url: t.url,
-      active: t.active,
-      enabled: enabledTabs.includes(0) || enabledTabs.includes(t.id),
-    }));
+async function exec(tabId, func, args = [], world = 'ISOLATED') {
+  const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args, world });
+  return res ? res.result : undefined;
 }
-
-async function getActiveControllableTab() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab) throw new Error("没有活动标签页");
-  return { tabId: tab.id, title: tab.title, url: tab.url };
-}
-
-async function resolveTabId(params) {
-  let tabId = params.tabId;
-  if (!tabId) {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab) throw new Error("没有可用标签页, 请传入 tabId");
-    tabId = tab.id;
-  }
-  if (!(await isTabEnabled(tabId))) {
-    throw new Error(`标签页 ${tabId} 未授权。请在扩展弹窗中点击“在当前标签页启用”。`);
-  }
-  return tabId;
-}
-
-async function navigate({ tabId, url, newTab }) {
-  if (!url) throw new Error("navigate 需要 url");
-  let tab;
-  if (newTab) {
-    tab = await chrome.tabs.create({ url, active: true });
-    // 新建的标签页自动加入授权白名单
-    const { enabledTabs } = await getConfig();
-    if (!enabledTabs.includes(tab.id)) {
-      enabledTabs.push(tab.id);
-      await chrome.storage.local.set({ enabledTabs });
-    }
-  } else {
-    const id = await resolveTabId({ tabId });
-    tab = await chrome.tabs.update(id, { url });
-  }
-  await waitForTabComplete(tab.id);
-  const finalTab = await chrome.tabs.get(tab.id);
-  return { tabId: tab.id, url: finalTab.url, title: finalTab.title };
-}
-
-function waitForTabComplete(tabId, timeout = 30000) {
+function waitForLoad(tabId, timeout = 20000) {
   return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      chrome.tabs.onUpdated.removeListener(listener);
-      // 给前端框架渲染一点时间
-      setTimeout(resolve, 800);
-    };
-    const listener = (id, info) => {
-      if (id === tabId && info.status === "complete") finish();
-    };
+    const finish = () => { chrome.tabs.onUpdated.removeListener(listener); clearTimeout(t); setTimeout(resolve, 600); };
+    const t = setTimeout(finish, timeout);
+    function listener(id, info) { if (id === tabId && info.status === 'complete') finish(); }
     chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.get(tabId).then((t) => {
-      if (t && t.status === "complete") finish();
-    });
-    setTimeout(finish, timeout);
+    chrome.tabs.get(tabId).then((tab) => { if (tab && tab.status === 'complete') finish(); }).catch(() => {});
   });
 }
 
-// ---------------------------------------------------------------------------
-// 与 content script 通信 (DOM 层: 读取/快照/填充)
-// ---------------------------------------------------------------------------
-async function contentAction(tabId, message) {
-  const id = await resolveTabId({ tabId });
-  await ensureContentScript(id);
-  return await chrome.tabs.sendMessage(id, message);
-}
-
-async function ensureContentScript(tabId) {
-  try {
-    const pong = await chrome.tabs.sendMessage(tabId, { action: "ping" });
-    if (pong && pong.ok) return;
-  } catch {
-    // 未注入, 动态注入
-    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] }).catch(() => {});
-    await chrome.scripting.insertCSS({ target: { tabId }, files: ["content.css"] }).catch(() => {});
-  }
-}
-
-// ---------------------------------------------------------------------------
-// CDP 层: 真实输入事件 / 截图
-// ---------------------------------------------------------------------------
+/* ------------------------------ CDP ------------------------------ */
 async function attach(tabId) {
   if (attached.has(tabId)) return;
   await chrome.debugger.attach({ tabId }, CDP_VERSION);
   attached.add(tabId);
-  await cdp(tabId, "DOM.enable", {});
-  await cdp(tabId, "Runtime.enable", {});
 }
-
 function cdp(tabId, method, params) {
   return new Promise((resolve, reject) => {
     chrome.debugger.sendCommand({ tabId }, method, params || {}, (res) => {
       const err = chrome.runtime.lastError;
-      if (err) reject(new Error(`${method}: ${err.message}`));
+      if (err) reject(new Error(method + ': ' + err.message));
       else resolve(res);
     });
   });
 }
-
-chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId) attached.delete(source.tabId);
-});
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.debugger.onDetach.addListener((src) => { if (src.tabId) attached.delete(src.tabId); });
+chrome.tabs.onRemoved.addListener(async (tabId) => {
   attached.delete(tabId);
-  cleanupEnabledTab(tabId);
+  const { enabledTabs } = await getEnabled();
+  const next = enabledTabs.filter((t) => t !== tabId);
+  if (next.length !== enabledTabs.length) chrome.storage.local.set({ enabledTabs: next });
 });
 
-async function cleanupEnabledTab(tabId) {
-  const { enabledTabs } = await getConfig();
-  const next = enabledTabs.filter((t) => t !== tabId);
-  if (next.length !== enabledTabs.length) await chrome.storage.local.set({ enabledTabs: next });
-}
-
-async function withDebugger(tabId, fn) {
+async function cdpClick(tabId, x, y) {
   await attach(tabId);
-  try {
-    return await fn();
-  } finally {
-    // 保持 attach 以便连续操作; 由空闲检测/标签关闭时清理
-  }
-}
-
-// 点击: 支持 ref / selector / 坐标。先解析坐标, 显示代理光标, 再派发真实鼠标事件
-async function click(params) {
-  const tabId = await resolveTabId(params);
-  let x = params.x, y = params.y;
-  if (x == null || y == null) {
-    const point = await contentAction(tabId, { action: "resolvePoint", ref: params.ref, selector: params.selector });
-    x = point.x; y = point.y;
-    await chrome.tabs.sendMessage(tabId, { action: "cursorTo", x, y }).catch(() => {});
-  }
-  await withDebugger(tabId, async () => {
-    const base = { x, y, button: "left", clickCount: 1 };
-    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", ...base, clickCount: 0 });
-    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", ...base });
-    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", ...base });
-  });
-  return { ok: true, x, y };
-}
-
-// 输入文本: 用 CDP Input.insertText (像真实输入, 兼容 contenteditable / 钉钉编辑器)
-async function typeText(params) {
-  const tabId = await resolveTabId(params);
-  if (params.ref || params.selector) {
-    // 先聚焦目标
-    const point = await contentAction(tabId, { action: "resolvePoint", ref: params.ref, selector: params.selector });
-    await chrome.tabs.sendMessage(tabId, { action: "cursorTo", x: point.x, y: point.y }).catch(() => {});
-    await withDebugger(tabId, async () => {
-      const base = { x: point.x, y: point.y, button: "left", clickCount: 1 };
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", ...base });
-      await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", ...base });
-    });
-  }
-  await withDebugger(tabId, async () => {
-    await cdp(tabId, "Input.insertText", { text: params.text || "" });
-  });
-  return { ok: true, length: (params.text || "").length };
+  const base = { x, y, button: 'left', clickCount: 1 };
+  await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', ...base, clickCount: 0 });
+  await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
+  await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
 }
 
 const KEY_MAP = {
-  Enter: { code: "Enter", key: "Enter", windowsVirtualKeyCode: 13, text: "\r" },
-  Tab: { code: "Tab", key: "Tab", windowsVirtualKeyCode: 9 },
-  Backspace: { code: "Backspace", key: "Backspace", windowsVirtualKeyCode: 8 },
-  Delete: { code: "Delete", key: "Delete", windowsVirtualKeyCode: 46 },
-  Escape: { code: "Escape", key: "Escape", windowsVirtualKeyCode: 27 },
-  ArrowUp: { code: "ArrowUp", key: "ArrowUp", windowsVirtualKeyCode: 38 },
-  ArrowDown: { code: "ArrowDown", key: "ArrowDown", windowsVirtualKeyCode: 40 },
-  ArrowLeft: { code: "ArrowLeft", key: "ArrowLeft", windowsVirtualKeyCode: 37 },
-  ArrowRight: { code: "ArrowRight", key: "ArrowRight", windowsVirtualKeyCode: 39 },
-  Home: { code: "Home", key: "Home", windowsVirtualKeyCode: 36 },
-  End: { code: "End", key: "End", windowsVirtualKeyCode: 35 },
+  Enter: { code: 'Enter', key: 'Enter', windowsVirtualKeyCode: 13, text: '\r' },
+  Tab: { code: 'Tab', key: 'Tab', windowsVirtualKeyCode: 9 },
+  Backspace: { code: 'Backspace', key: 'Backspace', windowsVirtualKeyCode: 8 },
+  Delete: { code: 'Delete', key: 'Delete', windowsVirtualKeyCode: 46 },
+  Escape: { code: 'Escape', key: 'Escape', windowsVirtualKeyCode: 27 },
+  ArrowUp: { code: 'ArrowUp', key: 'ArrowUp', windowsVirtualKeyCode: 38 },
+  ArrowDown: { code: 'ArrowDown', key: 'ArrowDown', windowsVirtualKeyCode: 40 },
+  ArrowLeft: { code: 'ArrowLeft', key: 'ArrowLeft', windowsVirtualKeyCode: 37 },
+  ArrowRight: { code: 'ArrowRight', key: 'ArrowRight', windowsVirtualKeyCode: 39 },
+  Home: { code: 'Home', key: 'Home', windowsVirtualKeyCode: 36 },
+  End: { code: 'End', key: 'End', windowsVirtualKeyCode: 35 },
 };
 
-async function pressKey(params) {
-  const tabId = await resolveTabId(params);
-  const spec = KEY_MAP[params.key];
-  if (!spec) throw new Error(`不支持的按键: ${params.key}`);
-  const modifiers = (params.modifiers || []).reduce((m, k) => {
-    return m | ({ Alt: 1, Ctrl: 2, Control: 2, Meta: 4, Shift: 8 }[k] || 0);
-  }, 0);
-  await withDebugger(tabId, async () => {
-    await cdp(tabId, "Input.dispatchKeyEvent", { type: "keyDown", modifiers, ...spec });
-    await cdp(tabId, "Input.dispatchKeyEvent", { type: "keyUp", modifiers, ...spec });
-  });
-  return { ok: true };
+/* --------------------- 注入函数 (在页面里执行) --------------------- */
+function injResolvePoint(ref, selector, matchText) {
+  let el = null;
+  if (ref) el = document.querySelector('[data-cc-ref="' + ref + '"]');
+  if (!el && selector) el = document.querySelector(selector);
+  if (!el && matchText) {
+    const nodes = Array.from(document.querySelectorAll('a,button,[role=button],input,div,span,li,td'));
+    el = nodes.find((n) => ((n.innerText || n.value || '') + '').trim().includes(matchText));
+  }
+  if (!el) return { found: false };
+  el.scrollIntoView({ block: 'center', inline: 'center' });
+  const r = el.getBoundingClientRect();
+  return { found: true, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 }
 
-// 聚焦标题/正文编辑区 (用 CDP 真实点击, 让钉钉编辑器进入可输入状态)
-async function focusTarget(params) {
-  const tabId = await resolveTabId(params);
-  const point = await contentAction(tabId, { action: "focusTarget", target: params.target || "body" });
-  await chrome.tabs.sendMessage(tabId, { action: "cursorTo", x: point.x, y: point.y }).catch(() => {});
-  await withDebugger(tabId, async () => {
-    const base = { x: point.x, y: point.y, button: "left", clickCount: 1 };
-    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", ...base });
-    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", ...base });
-  });
-  return { ok: true, ...point };
+function injFocusPoint(target, bodySel, titleSel) {
+  const sels = target === 'title' ? titleSel : bodySel;
+  let el = null;
+  for (const s of sels) { el = document.querySelector(s); if (el) break; }
+  if (!el && target !== 'title') el = document.querySelector('[contenteditable="true"]');
+  if (!el) return { found: false };
+  const inner = el.querySelector && el.querySelector('[contenteditable="true"]');
+  if (inner) el = inner;
+  el.scrollIntoView({ block: 'center' });
+  const r = el.getBoundingClientRect();
+  const y = target === 'title' ? r.top + r.height / 2 : Math.min(r.bottom - 16, r.top + r.height / 2);
+  return { found: true, x: Math.round(r.left + Math.min(40, r.width / 2)), y: Math.round(y) };
 }
 
-// 粘贴文本 (合成 paste 事件), 适合大段/富文本一次性写入
-async function pasteText(params) {
-  if (params.focus) await focusTarget({ tabId: params.tabId, target: params.target || "body" });
-  return await contentAction(params.tabId, {
-    action: "paste", text: params.text, html: params.html, ref: params.ref, selector: params.selector,
+function injSnapshot(maxElements, bodySel) {
+  const SEL = 'a[href],button,input,textarea,select,[role=button],[role=link],[role=tab],[role=menuitem],[role=textbox],[contenteditable=true],summary,label';
+  const out = []; const seen = new Set(); let n = 0;
+  const vis = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none' && r.top < innerHeight + 1500 && r.bottom > -50;
+  };
+  document.querySelectorAll(SEL).forEach((el) => {
+    if (out.length >= (maxElements || 200) || seen.has(el) || !vis(el)) return;
+    seen.add(el);
+    const ref = 'e' + (++n);
+    el.setAttribute('data-cc-ref', ref);
+    const r = el.getBoundingClientRect();
+    const name = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.value || el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+    out.push({ ref, tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || el.type || el.tagName.toLowerCase(), name, editable: el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA', rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } });
   });
+  return { url: location.href, title: document.title, viewport: { w: innerWidth, h: innerHeight }, elements: out };
 }
 
-async function scroll(params) {
-  const tabId = await resolveTabId(params);
-  const dx = params.dx || 0, dy = params.dy != null ? params.dy : 600;
-  await withDebugger(tabId, async () => {
-    await cdp(tabId, "Input.dispatchMouseEvent", {
-      type: "mouseWheel", x: params.x || 300, y: params.y || 300, deltaX: dx, deltaY: dy,
-    });
-  });
-  return { ok: true, dx, dy };
+function injPaste(text, html, ref, selector, bodySel) {
+  let el = null;
+  if (ref) el = document.querySelector('[data-cc-ref="' + ref + '"]');
+  if (!el && selector) el = document.querySelector(selector);
+  if (!el) { for (const s of bodySel) { el = document.querySelector(s); if (el) break; } }
+  if (!el) el = document.activeElement;
+  if (!el) return { ok: false, error: 'no target' };
+  const inner = el.querySelector && el.querySelector('[contenteditable="true"]');
+  if (inner) el = inner;
+  el.focus();
+  try {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', text || '');
+    if (html) dt.setData('text/html', html);
+    const ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
+    const notHandled = el.dispatchEvent(ev);
+    if (notHandled) document.execCommand('insertText', false, text || '');
+  } catch (e) {
+    try { document.execCommand('insertText', false, text || ''); } catch (_) {}
+  }
+  return { ok: true, length: (text || '').length };
 }
 
-async function screenshot(params) {
-  const tabId = await resolveTabId(params);
-  const data = await withDebugger(tabId, async () => {
-    const res = await cdp(tabId, "Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
-    return res.data;
-  });
-  return { mimeType: "image/png", base64: data };
+function injCursor(x, y) {
+  let c = document.getElementById('__cc_cursor');
+  if (!c) {
+    c = document.createElement('div');
+    c.id = '__cc_cursor';
+    c.style.cssText = 'position:fixed;top:0;left:0;width:18px;height:18px;margin:-4px 0 0 -4px;z-index:2147483647;pointer-events:none;border-radius:50%;background:rgba(37,99,235,.35);border:2px solid #2563eb;box-shadow:0 0 0 4px rgba(37,99,235,.15);transition:transform .18s cubic-bezier(.22,1,.36,1),opacity .3s;';
+    document.documentElement.appendChild(c);
+  }
+  c.style.transform = 'translate(' + x + 'px,' + y + 'px)';
+  c.style.opacity = '1';
+  clearTimeout(c.__h);
+  c.__h = setTimeout(() => { c.style.opacity = '0'; }, 2500);
+  return true;
 }
 
-async function evalJs(params) {
-  const tabId = await resolveTabId(params);
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: (code) => {
-      try { return { ok: true, value: eval(code) }; }
-      catch (e) { return { ok: false, error: String(e) }; }
-    },
-    args: [params.expression || ""],
-  });
-  return result;
+/* ------------------------------ dispatch ------------------------------ */
+async function dispatch(method, params) {
+  switch (method) {
+    /* ---------- 读取 / 探查 (不需授权) ---------- */
+    case 'list_tabs': {
+      const tabs = await chrome.tabs.query({});
+      const { enabledTabs, allowAll } = await getEnabled();
+      return tabs.map((t) => ({ tabId: t.id, title: t.title, url: t.url, active: t.active, windowId: t.windowId, enabled: allowAll || enabledTabs.includes(t.id) }));
+    }
+    case 'tab_info': {
+      const t = await chrome.tabs.get(params.tabId);
+      return { tabId: t.id, title: t.title, url: t.url, status: t.status };
+    }
+    case 'get_content': {
+      const tabId = await resolveTab(params);
+      return exec(tabId, (titleSel, bodySel) => {
+        let docTitle = '';
+        for (const s of titleSel) { const e = document.querySelector(s); if (e) { docTitle = (e.value || e.innerText || '').trim(); break; } }
+        let root = document.body;
+        for (const s of bodySel) { const e = document.querySelector(s); if (e && (e.innerText || '').trim().length > 20) { root = e; break; } }
+        return { title: document.title, docTitle, url: location.href, text: root ? root.innerText : '' };
+      }, [TITLE_SELECTORS, BODY_SELECTORS]);
+    }
+    case 'get_html': {
+      const tabId = await resolveTab(params);
+      return exec(tabId, (selector) => {
+        const el = selector ? document.querySelector(selector) : document.documentElement;
+        return { html: el ? el.outerHTML : null };
+      }, [params.selector || null]);
+    }
+    case 'query': {
+      const tabId = await resolveTab(params);
+      return exec(tabId, (selector, limit) => Array.from(document.querySelectorAll(selector)).slice(0, limit || 30).map((el) => ({
+        tag: el.tagName, id: el.id || undefined,
+        class: (typeof el.className === 'string' && el.className) || undefined,
+        name: el.getAttribute('name') || undefined, href: el.getAttribute('href') || undefined,
+        text: ((el.innerText || el.value || '') + '').trim().slice(0, 120) || undefined,
+      })), [params.selector, params.limit || 30]);
+    }
+    case 'snapshot': {
+      const tabId = await resolveTab(params);
+      return exec(tabId, injSnapshot, [params.maxElements || 200, BODY_SELECTORS]);
+    }
+    case 'get_selection': {
+      const tabId = await resolveTab(params);
+      return exec(tabId, () => ({ text: window.getSelection().toString() }));
+    }
+    case 'screenshot': {
+      const tabId = await resolveTab(params);
+      const tab = await chrome.tabs.get(tabId);
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      return { dataUrl };
+    }
+
+    /* ---------- 导航 ---------- */
+    case 'navigate': {
+      if (params.newTab) {
+        const tab = await chrome.tabs.create({ url: params.url });
+        await authorizeTab(tab.id); // 新开标签页自动授权
+        await waitForLoad(tab.id);
+        const cur = await chrome.tabs.get(tab.id);
+        return { tabId: tab.id, url: cur.url };
+      }
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      await chrome.tabs.update(tabId, { url: params.url });
+      await waitForLoad(tabId);
+      const cur = await chrome.tabs.get(tabId);
+      return { tabId, url: cur.url };
+    }
+
+    /* ---------- 写操作 (需授权) ---------- */
+    case 'click': {
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      let x = params.x, y = params.y;
+      if (x == null || y == null) {
+        const pt = await exec(tabId, injResolvePoint, [params.ref || null, params.selector || null, params.text || null]);
+        if (!pt || !pt.found) return { clicked: false, reason: 'element not found' };
+        x = pt.x; y = pt.y;
+      }
+      await exec(tabId, injCursor, [x, y]).catch(() => {});
+      if (params.real || params.x != null) {
+        await cdpClick(tabId, x, y);
+        return { clicked: true, via: 'cdp', x, y };
+      }
+      // 默认 DOM 点击 (更快, 多数页面够用)
+      const r = await exec(tabId, (ref, selector, matchText) => {
+        let el = null;
+        if (ref) el = document.querySelector('[data-cc-ref="' + ref + '"]');
+        if (!el && selector) el = document.querySelector(selector);
+        if (!el && matchText) { const nodes = Array.from(document.querySelectorAll('a,button,[role=button],input[type=submit],input[type=button],div,span,li,td')); el = nodes.find((n) => ((n.innerText || n.value || '') + '').trim().includes(matchText)); }
+        if (!el) return { clicked: false, reason: 'element not found' };
+        el.scrollIntoView({ block: 'center' }); el.click();
+        return { clicked: true, via: 'dom', tag: el.tagName, text: ((el.innerText || '') + '').slice(0, 80) };
+      }, [params.ref || null, params.selector || null, params.text || null]);
+      return r;
+    }
+    case 'fill': {
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      return exec(tabId, (selector, value) => {
+        const el = document.querySelector(selector);
+        if (!el) return { filled: false, reason: 'element not found' };
+        el.focus();
+        if (el.isContentEditable) {
+          el.textContent = value;
+          el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        } else {
+          const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        return { filled: true };
+      }, [params.selector, params.value]);
+    }
+    case 'focus_target': {
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      const pt = await exec(tabId, injFocusPoint, [params.target || 'body', BODY_SELECTORS, TITLE_SELECTORS]);
+      if (!pt || !pt.found) throw new Error('找不到' + (params.target === 'title' ? '标题' : '正文') + '编辑区');
+      await exec(tabId, injCursor, [pt.x, pt.y]).catch(() => {});
+      await cdpClick(tabId, pt.x, pt.y);
+      return { ok: true, ...pt };
+    }
+    case 'type_text': {
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      if (params.ref || params.selector) {
+        const pt = await exec(tabId, injResolvePoint, [params.ref || null, params.selector || null, null]);
+        if (pt && pt.found) { await exec(tabId, injCursor, [pt.x, pt.y]).catch(() => {}); await cdpClick(tabId, pt.x, pt.y); }
+      }
+      await attach(tabId);
+      await cdp(tabId, 'Input.insertText', { text: params.text || '' });
+      return { ok: true, length: (params.text || '').length };
+    }
+    case 'paste_text': {
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      if (params.focus) {
+        const pt = await exec(tabId, injFocusPoint, [params.target || 'body', BODY_SELECTORS, TITLE_SELECTORS]);
+        if (pt && pt.found) { await exec(tabId, injCursor, [pt.x, pt.y]).catch(() => {}); await cdpClick(tabId, pt.x, pt.y); }
+      }
+      return exec(tabId, injPaste, [params.text || '', params.html || null, params.ref || null, params.selector || null, BODY_SELECTORS]);
+    }
+    case 'press_key': {
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      const spec = KEY_MAP[params.key];
+      if (!spec) throw new Error('不支持的按键: ' + params.key);
+      const modifiers = (params.modifiers || []).reduce((m, k) => m | ({ Alt: 1, Ctrl: 2, Control: 2, Meta: 4, Shift: 8 }[k] || 0), 0);
+      await attach(tabId);
+      await cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', modifiers, ...spec });
+      await cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', modifiers, ...spec });
+      return { ok: true };
+    }
+    case 'scroll': {
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      await attach(tabId);
+      await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x: 300, y: 300, deltaX: params.dx || 0, deltaY: params.dy != null ? params.dy : 600 });
+      return { ok: true };
+    }
+    case 'execute_js': {
+      const tabId = await resolveTab(params);
+      await requireAuth(tabId);
+      const world = params.world === 'ISOLATED' ? 'ISOLATED' : 'MAIN';
+      return exec(tabId, (code) => {
+        try {
+          const r = (0, eval)(code);
+          let value;
+          if (r === undefined) value = undefined;
+          else if (r === null) value = null;
+          else if (typeof r === 'object') { try { value = JSON.stringify(r); } catch (_) { value = String(r); } }
+          else value = String(r);
+          return { ok: true, value };
+        } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
+      }, [params.code], world);
+    }
+
+    default:
+      throw new Error('Unknown method: ' + method);
+  }
 }
 
-// ---------------------------------------------------------------------------
-// 来自 popup 的消息 (启用/禁用标签页、查询状态、手动重连)
-// ---------------------------------------------------------------------------
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+/* ------------------------------ lifecycle ------------------------------ */
+chrome.runtime.onStartup.addListener(connect);
+chrome.runtime.onInstalled.addListener(connect);
+chrome.alarms.create('keepalive', { periodInMinutes: 0.4 });
+chrome.alarms.onAlarm.addListener(() => { if (!ws || ws.readyState > 1) connect(); });
+
+chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
   (async () => {
-    if (msg.type === "POPUP_GET_STATE") {
-      const { connectionStatus } = await chrome.storage.local.get("connectionStatus");
-      const { enabledTabs, port } = await getConfig();
+    if (req.type === 'connect') { connect(); sendResponse({ ok: true }); return; }
+    if (req.type === 'status') {
+      const { connected, port } = await chrome.storage.local.get(['connected', 'port']);
+      const { enabledTabs, allowAll } = await getEnabled();
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      sendResponse({
-        status: connectionStatus || "disconnected",
-        port,
-        enabledTabs,
-        activeTab: tab ? { tabId: tab.id, title: tab.title, url: tab.url, enabled: enabledTabs.includes(tab.id) || enabledTabs.includes(0) } : null,
-      });
-    } else if (msg.type === "POPUP_TOGGLE_TAB") {
-      const { enabledTabs } = await getConfig();
-      const idx = enabledTabs.indexOf(msg.tabId);
-      if (idx >= 0) enabledTabs.splice(idx, 1);
-      else enabledTabs.push(msg.tabId);
+      sendResponse({ connected: !!connected, port: port || DEFAULT_PORT, enabledTabs, allowAll, activeTab: tab ? { tabId: tab.id, title: tab.title, url: tab.url, enabled: allowAll || enabledTabs.includes(tab.id), windowId: tab.windowId } : null });
+      return;
+    }
+    if (req.type === 'toggle_tab') {
+      const { enabledTabs } = await getEnabled();
+      const i = enabledTabs.indexOf(req.tabId);
+      if (i >= 0) enabledTabs.splice(i, 1); else enabledTabs.push(req.tabId);
       await chrome.storage.local.set({ enabledTabs });
       sendResponse({ enabledTabs });
-    } else if (msg.type === "POPUP_SET_PORT") {
-      await chrome.storage.local.set({ bridgePort: msg.port });
-      try { if (socket) socket.close(); } catch {}
-      reconnectDelay = 1000;
-      connect();
-      sendResponse({ ok: true });
-    } else if (msg.type === "POPUP_RECONNECT") {
-      try { if (socket) socket.close(); } catch {}
-      reconnectDelay = 1000;
-      connect();
-      sendResponse({ ok: true });
+      return;
     }
+    if (req.type === 'set_allow_all') { await chrome.storage.local.set({ allowAll: !!req.value }); sendResponse({ ok: true }); return; }
   })();
   return true; // async
 });
 
-// ---------------------------------------------------------------------------
-// 启动 + keepalive (MV3 service worker 会休眠, 用 alarms 唤醒重连)
-// ---------------------------------------------------------------------------
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
 connect();

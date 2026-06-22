@@ -1,0 +1,15 @@
+{
+  "name": "cc-browser-bridge",
+  "version": "1.0.0",
+  "description": "MCP server that bridges local Claude Code to a Chrome extension so it can read and edit pages in your real browser.",
+  "type": "commonjs",
+  "bin": {
+    "cc-browser-bridge": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

@@ -1,68 +1,49 @@
 const $ = (id) => document.getElementById(id);
 let state = null;
 
-async function refresh() {
-  state = await chrome.runtime.sendMessage({ type: "POPUP_GET_STATE" });
-  const st = $("status");
-  if (state.status === "connected") {
-    st.textContent = "● 已连接";
-    st.className = "status connected";
-  } else {
-    st.textContent = "● 未连接";
-    st.className = "status disconnected";
-  }
-  $("port").value = state.port;
-  $("enabledCount").textContent = `已授权标签页: ${state.enabledTabs.filter((t) => t !== 0).length}${state.enabledTabs.includes(0) ? " (全部)" : ""}`;
+function render(s) {
+  state = s;
+  const connected = s && s.connected;
+  $('dot').className = 'dot ' + (connected ? 'on' : 'off');
+  $('status').textContent = connected ? '已连接' : '未连接';
+  if (document.activeElement !== $('port')) $('port').value = (s && s.port) || 8765;
+  $('allowAll').checked = !!(s && s.allowAll);
 
-  if (state.activeTab) {
-    $("tabTitle").textContent = state.activeTab.title || "(无标题)";
-    $("tabUrl").textContent = state.activeTab.url || "";
-    const btn = $("toggleTab");
-    if (state.activeTab.enabled) {
-      btn.textContent = "已启用 ✓ 点击停用";
-      btn.className = "primary wide enabled";
-    } else {
-      btn.textContent = "在当前标签页启用";
-      btn.className = "primary wide";
-    }
+  if (s && s.activeTab) {
+    $('tabTitle').textContent = s.activeTab.title || '(无标题)';
+    $('tabUrl').textContent = s.activeTab.url || '';
+    const btn = $('toggleTab');
+    if (s.activeTab.enabled) { btn.textContent = '已启用 ✓ 点击停用'; btn.className = 'on'; }
+    else { btn.textContent = '在当前标签页启用'; btn.className = ''; }
   } else {
-    $("tabTitle").textContent = "无可用标签页";
+    $('tabTitle').textContent = '无可用标签页';
+    $('tabUrl').textContent = '';
   }
 }
 
-$("toggleTab").addEventListener("click", async () => {
+function refresh() { chrome.runtime.sendMessage({ type: 'status' }, render); }
+
+$('connect').addEventListener('click', () => {
+  const port = parseInt($('port').value, 10) || 8765;
+  chrome.storage.local.set({ port }, () => {
+    chrome.runtime.sendMessage({ type: 'connect' }, () => setTimeout(refresh, 600));
+  });
+});
+
+$('toggleTab').addEventListener('click', () => {
   if (!state || !state.activeTab) return;
-  await chrome.runtime.sendMessage({ type: "POPUP_TOGGLE_TAB", tabId: state.activeTab.tabId });
-  refresh();
+  chrome.runtime.sendMessage({ type: 'toggle_tab', tabId: state.activeTab.tabId }, () => setTimeout(refresh, 150));
 });
 
-$("savePort").addEventListener("click", async () => {
-  const port = parseInt($("port").value, 10);
-  if (port > 0 && port < 65536) {
-    await chrome.runtime.sendMessage({ type: "POPUP_SET_PORT", port });
-    setTimeout(refresh, 500);
-  }
+$('allowAll').addEventListener('change', (e) => {
+  chrome.runtime.sendMessage({ type: 'set_allow_all', value: e.target.checked }, () => setTimeout(refresh, 150));
 });
 
-$("reconnect").addEventListener("click", async () => {
-  await chrome.runtime.sendMessage({ type: "POPUP_RECONNECT" });
-  setTimeout(refresh, 500);
-});
-
-$("openPanel").addEventListener("click", async () => {
+$('openPanel').addEventListener('click', async () => {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  try {
-    await chrome.sidePanel.open({ windowId: tab.windowId });
-    window.close();
-  } catch (e) {
-    // 某些版本需 tabId
-    try { await chrome.sidePanel.open({ tabId: tab.id }); window.close(); } catch {}
-  }
-});
-
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "STATUS_UPDATE") refresh();
+  try { await chrome.sidePanel.open({ windowId: tab.windowId }); window.close(); }
+  catch (e) { try { await chrome.sidePanel.open({ tabId: tab.id }); window.close(); } catch (_) {} }
 });
 
 refresh();
-setInterval(refresh, 2000);
+setInterval(refresh, 1500);
