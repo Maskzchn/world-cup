@@ -1,0 +1,20 @@
+{
+  "name": "cc-browser-bridge",
+  "version": "0.1.0",
+  "description": "本地桥接进程: 把 Claude Code 的 MCP 工具调用转发给 Chrome 扩展, 通过 CDP+DOM 控制浏览器。",
+  "type": "module",
+  "bin": {
+    "cc-browser-bridge": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  }
+}
