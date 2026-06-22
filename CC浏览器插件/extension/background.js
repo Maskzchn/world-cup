@@ -115,12 +115,28 @@ function broadcastStatus(status) {
 // ---------------------------------------------------------------------------
 async function handleCommand({ id, method, params }) {
   params = params || {};
+  const startedAt = Date.now();
   try {
     const result = await dispatch(method, params);
     send({ type: "result", id, ok: true, result });
+    logActivity({ method, tabId: params.tabId, ok: true, ms: Date.now() - startedAt });
   } catch (err) {
-    send({ type: "result", id, ok: false, error: String(err && err.message ? err.message : err) });
+    const error = String(err && err.message ? err.message : err);
+    send({ type: "result", id, ok: false, error });
+    logActivity({ method, tabId: params.tabId, ok: false, error, ms: Date.now() - startedAt });
   }
+}
+
+// 最近活动环形缓冲 (供侧边栏展示)
+const ACTIVITY_MAX = 60;
+async function logActivity(entry) {
+  entry.t = Date.now();
+  const { activity } = await chrome.storage.local.get("activity");
+  const list = activity || [];
+  list.unshift(entry);
+  if (list.length > ACTIVITY_MAX) list.length = ACTIVITY_MAX;
+  await chrome.storage.local.set({ activity: list });
+  chrome.runtime.sendMessage({ type: "ACTIVITY", entry }).catch(() => {});
 }
 
 async function dispatch(method, params) {
@@ -149,6 +165,10 @@ async function dispatch(method, params) {
       return await contentAction(params.tabId, { action: "fill", selector: params.selector, ref: params.ref, text: params.text });
     case "press_key":
       return await pressKey(params);
+    case "focus_target":
+      return await focusTarget(params);
+    case "paste_text":
+      return await pasteText(params);
     case "scroll":
       return await scroll(params);
     case "eval_js":
@@ -362,6 +382,27 @@ async function pressKey(params) {
     await cdp(tabId, "Input.dispatchKeyEvent", { type: "keyUp", modifiers, ...spec });
   });
   return { ok: true };
+}
+
+// 聚焦标题/正文编辑区 (用 CDP 真实点击, 让钉钉编辑器进入可输入状态)
+async function focusTarget(params) {
+  const tabId = await resolveTabId(params);
+  const point = await contentAction(tabId, { action: "focusTarget", target: params.target || "body" });
+  await chrome.tabs.sendMessage(tabId, { action: "cursorTo", x: point.x, y: point.y }).catch(() => {});
+  await withDebugger(tabId, async () => {
+    const base = { x: point.x, y: point.y, button: "left", clickCount: 1 };
+    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", ...base });
+    await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", ...base });
+  });
+  return { ok: true, ...point };
+}
+
+// 粘贴文本 (合成 paste 事件), 适合大段/富文本一次性写入
+async function pasteText(params) {
+  if (params.focus) await focusTarget({ tabId: params.tabId, target: params.target || "body" });
+  return await contentAction(params.tabId, {
+    action: "paste", text: params.text, html: params.html, ref: params.ref, selector: params.selector,
+  });
 }
 
 async function scroll(params) {

@@ -86,17 +86,85 @@
   // -------------------------------------------------------------------------
   // 读正文 -> markdown (轻量转换) + 纯文本
   // -------------------------------------------------------------------------
+  // 钉钉文档基于语雀 Lake 编辑器, 这里覆盖常见的正文容器选择器
+  const DINGTALK_BODY_SELECTORS = [
+    ".ne-viewer-body", ".ne-engine", ".lake-engine-view", ".lakex-engine",
+    ".lake-engine", '[data-lake-id]', '[data-lake-element="root"]',
+    ".doc-content", '[data-testid="editor"]', ".ant-doc-editor", ".lake-editor",
+  ];
+  const DINGTALK_TITLE_SELECTORS = [
+    'textarea[placeholder*="标题"]', 'input[placeholder*="标题"]',
+    ".doc-title-input textarea", ".doc-title textarea", ".doc-title input",
+    '[data-testid="title"] textarea', "h1.title", ".title-editor",
+  ];
+
   function pickMainContainer() {
-    // 钉钉文档 / 语雀类编辑器优先
     const candidates = [
-      '[data-testid="editor"]', ".ant-doc-editor", ".lake-editor", ".ne-engine",
-      ".doc-editor", "article", "main", '[role="main"]', "#content",
+      ...DINGTALK_BODY_SELECTORS,
+      "article", "main", '[role="main"]', "#content",
     ];
     for (const sel of candidates) {
       const el = document.querySelector(sel);
-      if (el && (el.innerText || "").trim().length > 40) return el;
+      if (el && (el.innerText || "").trim().length > 20) return el;
     }
     return document.body;
+  }
+
+  function findTitleEl() {
+    for (const sel of DINGTALK_TITLE_SELECTORS) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  function findEditorEl() {
+    for (const sel of DINGTALK_BODY_SELECTORS) {
+      const el = document.querySelector(sel);
+      if (el) {
+        // 优先找到内部可编辑节点
+        const editable = el.querySelector('[contenteditable="true"]') ||
+          (el.getAttribute("contenteditable") === "true" ? el : null);
+        return editable || el;
+      }
+    }
+    return document.querySelector('[contenteditable="true"]');
+  }
+
+  // 聚焦标题/正文, 返回点击坐标 (供 CDP 真实点击聚焦)
+  function focusTarget({ target }) {
+    let el = target === "title" ? findTitleEl() : findEditorEl();
+    if (!el) throw new Error(`找不到${target === "title" ? "标题" : "正文"}编辑区`);
+    el.scrollIntoView({ block: "center", behavior: "instant" });
+    const rect = el.getBoundingClientRect();
+    // 正文点末尾区域, 标题点中部
+    const y = target === "title" ? rect.y + rect.height / 2 : Math.min(rect.y + rect.height - 16, rect.y + rect.height / 2);
+    return { x: Math.round(rect.x + Math.min(40, rect.width / 2)), y: Math.round(y), found: true };
+  }
+
+  // 粘贴通道: 用合成 paste 事件 (带 DataTransfer) 写入, 富文本编辑器通常优先处理 paste,
+  // 比逐字符 insertText 更稳、更快; 失败再回退 execCommand。
+  function pasteText({ text, html, ref, selector }) {
+    let el = null;
+    if (ref && refMap.has(ref)) el = refMap.get(ref);
+    else if (selector) el = document.querySelector(selector);
+    else el = findEditorEl() || document.activeElement;
+    if (!el) throw new Error("paste: 找不到目标编辑区");
+    el.focus();
+    try {
+      const dt = new DataTransfer();
+      dt.setData("text/plain", text || "");
+      if (html) dt.setData("text/html", html);
+      const ev = new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt });
+      const handled = !el.dispatchEvent(ev); // 被 preventDefault 视为已处理
+      if (!handled) {
+        // 回退: execCommand
+        document.execCommand("insertText", false, text || "");
+      }
+    } catch (e) {
+      document.execCommand("insertText", false, text || "");
+    }
+    return { ok: true, length: (text || "").length };
   }
 
   function toMarkdown(root) {
@@ -132,7 +200,9 @@
   function readContent({ format }) {
     const root = pickMainContainer();
     const text = (root.innerText || "").trim();
-    const result = { url: location.href, title: document.title, text };
+    const titleEl = findTitleEl();
+    const docTitle = titleEl ? (titleEl.value || titleEl.innerText || "").trim() : "";
+    const result = { url: location.href, title: docTitle || document.title, pageTitle: document.title, text };
     if (format === "markdown") result.markdown = toMarkdown(root);
     return result;
   }
@@ -188,6 +258,8 @@
         case "resolvePoint": sendResponse(resolvePoint(msg)); break;
         case "readContent": sendResponse(readContent(msg)); break;
         case "fill": sendResponse(fill(msg)); break;
+        case "paste": sendResponse(pasteText(msg)); break;
+        case "focusTarget": sendResponse(focusTarget(msg)); break;
         case "cursorTo": sendResponse(cursorTo(msg.x, msg.y)); break;
         default: sendResponse({ error: "unknown action " + msg.action });
       }

@@ -49,6 +49,17 @@ $("reconnect").addEventListener("click", async () => {
   setTimeout(refresh, 500);
 });
 
+$("openPanel").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  try {
+    await chrome.sidePanel.open({ windowId: tab.windowId });
+    window.close();
+  } catch (e) {
+    // 某些版本需 tabId
+    try { await chrome.sidePanel.open({ tabId: tab.id }); window.close(); } catch {}
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "STATUS_UPDATE") refresh();
 });

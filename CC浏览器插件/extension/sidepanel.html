@@ -4,8 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="stylesheet" href="popup.css" />
+    <link rel="stylesheet" href="sidepanel.css" />
   </head>
-  <body>
+  <body class="panel">
     <header>
       <div class="brand">CC Browser Bridge</div>
       <div id="status" class="status disconnected">● 未连接</div>
@@ -13,25 +14,23 @@
 
     <section class="card">
       <div class="row">
-        <label for="port">桥接端口</label>
+        <label for="port">端口</label>
         <input id="port" type="number" min="1" max="65535" />
         <button id="savePort" class="ghost">保存</button>
+        <button id="reconnect" class="ghost">重连</button>
       </div>
-      <button id="reconnect" class="ghost wide">重新连接</button>
-      <button id="openPanel" class="ghost wide">打开侧边栏 (实时活动)</button>
     </section>
 
     <section class="card">
-      <div class="tab-title" id="tabTitle">当前标签页</div>
-      <div class="tab-url" id="tabUrl"></div>
-      <button id="toggleTab" class="primary wide">在当前标签页启用</button>
-      <div class="hint">只有“已启用”的标签页才允许 Claude Code 操作。</div>
+      <div class="section-title">已授权标签页 <span class="hint" id="tabsHint"></span></div>
+      <div id="tabList" class="tab-list"></div>
     </section>
 
-    <footer>
-      <span id="enabledCount"></span>
-    </footer>
+    <section class="card grow">
+      <div class="section-title">实时活动 <button id="clearLog" class="ghost mini">清空</button></div>
+      <div id="log" class="log"></div>
+    </section>
 
-    <script src="popup.js"></script>
+    <script src="sidepanel.js"></script>
   </body>
 </html>

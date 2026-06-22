@@ -77,6 +77,16 @@ tool("browser_fill",
   { tabId: z.number().optional(), selector: z.string().optional(), ref: z.string().optional(), text: z.string() },
   (a) => bridge.sendCommand("fill", a));
 
+tool("browser_paste",
+  "把整段文本一次性粘贴到编辑区 (合成 paste 事件, 富文本编辑器更稳更快)。focus=true 先聚焦正文/标题。",
+  { tabId: z.number().optional(), text: z.string(), html: z.string().optional(), ref: z.string().optional(), selector: z.string().optional(), focus: z.boolean().optional(), target: z.enum(["body", "title"]).optional() },
+  (a) => bridge.sendCommand("paste_text", a));
+
+tool("browser_focus",
+  "聚焦文档的正文或标题编辑区 (用 CDP 真实点击)。target=body|title。",
+  { tabId: z.number().optional(), target: z.enum(["body", "title"]).optional() },
+  (a) => bridge.sendCommand("focus_target", a));
+
 tool("browser_press_key",
   "按下功能键 (Enter/Tab/Backspace/Delete/Escape/Arrow*/Home/End), 可带 modifiers。",
   { tabId: z.number().optional(), key: z.string(), modifiers: z.array(z.string()).optional() },
@@ -117,18 +127,27 @@ tool("dingtalk_create_doc",
     const nav = await bridge.sendCommand("navigate", { url, newTab: true });
     await sleep(3000);
     const tabId = nav.tabId;
-    // 标题: 钉钉文档进入后焦点通常在标题, 直接输入
+    // 标题: 聚焦标题区再输入 (失败则退回直接输入, 因新建页焦点常已在标题)
+    await bridge.sendCommand("focus_target", { tabId, target: "title" }).catch(() => {});
+    await sleep(300);
     await bridge.sendCommand("type_text", { tabId, text: a.title });
-    await bridge.sendCommand("press_key", { tabId, key: "Enter" });
-    await sleep(400);
+    await sleep(300);
+    // 正文: 聚焦正文区, 整段粘贴 (富文本更稳)
     if (a.content) {
-      const lines = a.content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i]) await bridge.sendCommand("type_text", { tabId, text: lines[i] });
-        if (i < lines.length - 1) await bridge.sendCommand("press_key", { tabId, key: "Enter" });
-        await sleep(120);
+      await bridge.sendCommand("focus_target", { tabId, target: "body" }).catch(() => {});
+      await sleep(300);
+      const pasted = await bridge.sendCommand("paste_text", { tabId, text: a.content }).catch((e) => ({ error: e.message }));
+      if (pasted && pasted.error) {
+        // 退回逐行输入
+        const lines = a.content.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i]) await bridge.sendCommand("type_text", { tabId, text: lines[i] });
+          if (i < lines.length - 1) await bridge.sendCommand("press_key", { tabId, key: "Enter" });
+          await sleep(100);
+        }
       }
     }
+    await sleep(500);
     const cur = await bridge.sendCommand("tab_info", { tabId }).catch(() => null);
     return {
       tabId,
@@ -145,15 +164,20 @@ tool("dingtalk_edit_doc",
     atEnd: z.boolean().optional().describe("true 则先跳到文档末尾 (Ctrl+End) 再输入"),
   },
   async (a) => {
+    await bridge.sendCommand("focus_target", { tabId: a.tabId, target: "body" }).catch(() => {});
+    await sleep(200);
     if (a.atEnd) {
       await bridge.sendCommand("press_key", { tabId: a.tabId, key: "End", modifiers: ["Ctrl"] });
       await sleep(200);
     }
-    const lines = a.text.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i]) await bridge.sendCommand("type_text", { tabId: a.tabId, text: lines[i] });
-      if (i < lines.length - 1) await bridge.sendCommand("press_key", { tabId: a.tabId, key: "Enter" });
-      await sleep(120);
+    const pasted = await bridge.sendCommand("paste_text", { tabId: a.tabId, text: a.text }).catch((e) => ({ error: e.message }));
+    if (pasted && pasted.error) {
+      const lines = a.text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i]) await bridge.sendCommand("type_text", { tabId: a.tabId, text: lines[i] });
+        if (i < lines.length - 1) await bridge.sendCommand("press_key", { tabId: a.tabId, key: "Enter" });
+        await sleep(100);
+      }
     }
     return { ok: true, written: a.text.length };
   });

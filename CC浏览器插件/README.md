@@ -58,6 +58,8 @@ claude mcp add cc-browser -- node /绝对路径/CC浏览器插件/server/index.j
 | `browser_screenshot` | 可见区域截图 PNG |
 | `browser_click` | 按 `ref` / `selector` / 坐标点击（CDP 真实点击） |
 | `browser_type` | 真实输入文本（兼容 contenteditable / 钉钉编辑器） |
+| `browser_paste` | 整段文本一次性粘贴（合成 paste 事件，富文本更稳更快） |
+| `browser_focus` | 聚焦文档正文/标题编辑区（CDP 真实点击） |
 | `browser_fill` | 直接设置 input/textarea 值（表单） |
 | `browser_press_key` | 功能键（Enter/Tab/方向键…，可带 modifiers） |
 | `browser_scroll` | 滚动 |
@@ -73,7 +75,8 @@ claude mcp add cc-browser -- node /绝对路径/CC浏览器插件/server/index.j
 
 ## 注意 / 已知限制
 - 使用 `debugger` 权限后，浏览器顶部会出现 **“CC Browser Bridge 正在调试此浏览器”** 黄条 —— 这与 Codex 扩展一致，是 CDP 控制的正常提示。
-- 钉钉文档是自研富文本编辑器，**新建/编辑以“真实键盘输入”方式写入**（逐行 `Input.insertText` + 回车），复杂排版（表格/样式）建议人工核对；钉钉自动保存。
+- 钉钉文档基于语雀 Lake 富文本编辑器，**新建/编辑优先用「整段粘贴」**（合成 paste 事件）写入，更稳更快；粘贴被编辑器拒绝时自动退回「逐行真实输入」。复杂排版（表格/样式）建议人工核对；钉钉自动保存。
+- 点扩展弹窗里的 **打开侧边栏 (实时活动)** 可常驻查看连接状态、已授权标签页，并**实时滚动显示 Claude Code 正在执行的每条浏览器命令**（方法/标签页/耗时/成败）。
 - 端口、`newDocUrl` 等可按需调整；钉钉新建入口若有变化，传 `newDocUrl` 覆盖默认值。
 - 扩展只操作**已授权**标签页，关闭标签页会自动取消授权。
 
